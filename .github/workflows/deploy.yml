@@ -8,7 +8,7 @@ on:
 
 env:
   AWS_REGION: ap-southeast-1
-  PULUMI_STACK: rfsamrat/mlops-pipeline/sandbox
+  PULUMI_STACK: sarwarmursalin/mlops-pipeline/sandbox
 
 jobs:
   test:
