@@ -392,8 +392,8 @@ jobs:
           # Get ECR repository URLs
           echo "Using unique suffix: $UNIQUE_SUFFIX"
           
-          ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names "mlops/ml-inference-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
-          DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names "mlops/data-ingestion-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
+          ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names "ml-inference-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
+          DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names "data-ingestion-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
           
           if [ -z "$ML_INFERENCE_REPO" ] || [ -z "$DATA_INGESTION_REPO" ]; then
             echo "❌ Error: Could not retrieve ECR repository URLs"
