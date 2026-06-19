@@ -60,9 +60,6 @@ jobs:
     if: github.ref == 'refs/heads/main'
     outputs:
       instance_ip: ${{ steps.get-outputs.outputs.instance_ip }}
-      ml_inference_repo: ${{ steps.get-outputs.outputs.ml_inference_repo }}
-      data_ingestion_repo: ${{ steps.get-outputs.outputs.data_ingestion_repo }}
-      unique_suffix: ${{ steps.get-outputs.outputs.unique_suffix }}
 
     steps:
     - uses: actions/checkout@v4
@@ -89,15 +86,6 @@ jobs:
         PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
       run: |
         echo "Performing complete stack cleanup..."
-        
-        # Clean up any MLOps ECR repositories first
-        REPOS=$(aws ecr describe-repositories --query 'repositories[?contains(repositoryName, `ml-inference`) || contains(repositoryName, `data-ingestion`)].repositoryName' --output text 2>/dev/null || echo "")
-        if [ ! -z "$REPOS" ]; then
-          for repo in $REPOS; do
-            echo "Force deleting repository: $repo"
-            aws ecr delete-repository --repository-name "$repo" --force || true
-          done
-        fi
         
         cd infrastructure
         pip install -r requirements.txt
@@ -139,64 +127,9 @@ jobs:
       run: |
         cd infrastructure
         echo "instance_ip=$(pulumi stack output instance_public_ip)" >> $GITHUB_OUTPUT
-        echo "ml_inference_repo=$(pulumi stack output ml_inference_repo_url)" >> $GITHUB_OUTPUT
-        echo "data_ingestion_repo=$(pulumi stack output data_ingestion_repo_url)" >> $GITHUB_OUTPUT
-        echo "unique_suffix=$(pulumi stack output unique_suffix)" >> $GITHUB_OUTPUT
-
-  build-and-push:
-    needs: deploy-infrastructure
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    strategy:
-      matrix:
-        service: [ml-inference, data-ingestion]
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
-
-    - name: Get Pulumi outputs
-      id: pulumi-outputs
-      run: |
-        if [ "${{ matrix.service }}" == "ml-inference" ]; then
-          echo "repository_url=${{ needs.deploy-infrastructure.outputs.ml_inference_repo }}" >> $GITHUB_OUTPUT
-        else
-          echo "repository_url=${{ needs.deploy-infrastructure.outputs.data_ingestion_repo }}" >> $GITHUB_OUTPUT
-        fi
-
-    - name: Build, tag, and push image to Amazon ECR
-      env:
-        ECR_REPOSITORY: ${{ steps.pulumi-outputs.outputs.repository_url }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        cd services/${{ matrix.service }}
-        
-        # Debug: List files to ensure we're in the right place
-        echo "Current directory contents:"
-        ls -la
-        
-        # Build the Docker image
-        docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
-        docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_REPOSITORY:latest
-        
-        # Push images
-        docker push $ECR_REPOSITORY:$IMAGE_TAG
-        docker push $ECR_REPOSITORY:latest
-        
-        echo "Successfully built and pushed ${{ matrix.service }}"
 
   deploy-services:
-    needs: [deploy-infrastructure, build-and-push]
+    needs: [deploy-infrastructure]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
 
@@ -214,7 +147,6 @@ jobs:
       id: get-instance
       run: |
         echo "instance_ip=${{ needs.deploy-infrastructure.outputs.instance_ip }}" >> $GITHUB_OUTPUT
-        echo "unique_suffix=${{ needs.deploy-infrastructure.outputs.unique_suffix }}" >> $GITHUB_OUTPUT
 
     - name: Wait for EC2 instance to be ready
       run: |
@@ -238,18 +170,12 @@ jobs:
 
     - name: Deploy services to EC2
       uses: appleboy/ssh-action@v1.0.3
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: ap-southeast-1
-        UNIQUE_SUFFIX: ${{ steps.get-instance.outputs.unique_suffix }}
       with:
         host: ${{ steps.get-instance.outputs.instance_ip }}
         username: ubuntu
         key: ${{ secrets.EC2_SSH_KEY }}
         timeout: 30m
         command_timeout: 30m
-        envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,UNIQUE_SUFFIX
         script: |
           echo "=== Starting EC2 Service Deployment ==="
           
@@ -281,14 +207,6 @@ jobs:
               sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
               sudo chmod +x /usr/local/bin/docker-compose
             fi
-            
-            # Manual AWS CLI installation (no apt-get)
-            if ! command -v aws &> /dev/null; then
-              echo "Installing AWS CLI..."
-              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-              unzip awscliv2.zip
-              sudo ./aws/install
-            fi
           else
             echo "✅ EC2 setup completed successfully!"
             cat /home/ubuntu/setup-info.txt
@@ -311,187 +229,22 @@ jobs:
             exit 1
           fi
           
-          # Configure AWS CLI with credentials from environment
-          echo "Configuring AWS CLI with provided credentials..."
-          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
-          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
-          aws configure set default.region ap-southeast-1
-          
-          # Test AWS credentials
-          echo "Testing AWS credentials..."
-          if aws sts get-caller-identity; then
-            echo "✅ AWS credentials working"
-          else
-            echo "❌ AWS credentials not working"
-            exit 1
-          fi
-          
-          # Login to ECR
-          echo "Logging into ECR..."
-          aws ecr get-login-password --region ap-southeast-1 | sudo docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.ap-southeast-1.amazonaws.com
+          # Clone the repo and build images from source (no ECR needed)
+          echo "📥 Cloning repository..."
+          cd /home/ubuntu
+          rm -rf mlops-pipeline
+          sudo apt-get install -y git 2>/dev/null || true
+          git clone https://github.com/sarwarmursalin/mlops-pipeline.git
+          cd mlops-pipeline
           
           # Create monitoring directories
           echo "Setting up monitoring directories..."
-          mkdir -p /home/ubuntu/monitoring/prometheus
-          mkdir -p /home/ubuntu/monitoring/grafana/provisioning/datasources
-          mkdir -p /home/ubuntu/monitoring/grafana/provisioning/dashboards
-          mkdir -p /home/ubuntu/monitoring/grafana/dashboards
+          sudo mkdir -p /prometheus-data /grafana-data
           
-          # Create Prometheus config
-          cat > /home/ubuntu/monitoring/prometheus/prometheus.yml << 'PROMETHEUS_EOF'
-          global:
-            scrape_interval: 15s
-            evaluation_interval: 15s
-          
-          scrape_configs:
-            - job_name: 'prometheus'
-              static_configs:
-                - targets: ['localhost:9090']
-          
-            - job_name: 'ml-inference'
-              static_configs:
-                - targets: ['ml-inference:8001']
-              metrics_path: '/metrics'
-              scrape_interval: 10s
-          
-            - job_name: 'data-ingestion'
-              static_configs:
-                - targets: ['data-ingestion:8002']
-              metrics_path: '/metrics'
-              scrape_interval: 10s
-          PROMETHEUS_EOF
-          
-          # Create Grafana datasource config
-          cat > /home/ubuntu/monitoring/grafana/provisioning/datasources/prometheus.yml << 'DATASOURCE_EOF'
-          apiVersion: 1
-          datasources:
-            - name: Prometheus
-              type: prometheus
-              access: proxy
-              url: http://prometheus:9090
-              isDefault: true
-              editable: false
-          DATASOURCE_EOF
-          
-          # Create Grafana dashboard provisioning config
-          cat > /home/ubuntu/monitoring/grafana/provisioning/dashboards/dashboard.yml << 'DASHBOARD_EOF'
-          apiVersion: 1
-          providers:
-            - name: 'MLOps Dashboards'
-              orgId: 1
-              folder: ''
-              type: file
-              disableDeletion: false
-              updateIntervalSeconds: 10
-              allowUiUpdates: true
-              options:
-                path: /var/lib/grafana/dashboards
-                foldersFromFilesStructure: true
-          DASHBOARD_EOF
-          
-          # Get ECR repository URLs
-          echo "Using unique suffix: $UNIQUE_SUFFIX"
-          
-          ML_INFERENCE_REPO=$(aws ecr describe-repositories --repository-names "ml-inference-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
-          DATA_INGESTION_REPO=$(aws ecr describe-repositories --repository-names "data-ingestion-$UNIQUE_SUFFIX" --query 'repositories[0].repositoryUri' --output text 2>/dev/null || echo "")
-          
-          if [ -z "$ML_INFERENCE_REPO" ] || [ -z "$DATA_INGESTION_REPO" ]; then
-            echo "❌ Error: Could not retrieve ECR repository URLs"
-            echo "Available repositories:"
-            aws ecr describe-repositories --query 'repositories[].repositoryName' --output text
-            exit 1
-          fi
-          
-          echo "✅ Repository URLs retrieved:"
-          echo "  ML Inference: $ML_INFERENCE_REPO"
-          echo "  Data Ingestion: $DATA_INGESTION_REPO"
-          
-          # Create docker-compose.yml
-          cat > /home/ubuntu/docker-compose.yml << COMPOSE_EOF
-          version: '3.8'
-          services:
-            ml-inference:
-              image: ${ML_INFERENCE_REPO}:latest
-              ports:
-                - "8001:8001"
-              restart: always
-              networks:
-                - mlops-network
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 90s
-                
-            data-ingestion:
-              image: ${DATA_INGESTION_REPO}:latest
-              ports:
-                - "8002:8002"
-              restart: always
-              networks:
-                - mlops-network
-              healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
-                interval: 30s
-                timeout: 10s
-                retries: 3
-                start_period: 90s
-                
-            prometheus:
-              image: prom/prometheus:latest
-              ports:
-                - "9090:9090"
-              volumes:
-                - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-                - prometheus-data:/prometheus
-              command:
-                - '--config.file=/etc/prometheus/prometheus.yml'
-                - '--storage.tsdb.path=/prometheus'
-                - '--web.console.libraries=/etc/prometheus/console_libraries'
-                - '--web.console.templates=/etc/prometheus/consoles'
-                - '--storage.tsdb.retention.time=200h'
-                - '--web.enable-lifecycle'
-              restart: always
-              networks:
-                - mlops-network
-                
-            grafana:
-              image: grafana/grafana:latest
-              ports:
-                - "3000:3000"
-              environment:
-                - GF_SECURITY_ADMIN_PASSWORD=admin
-                - GF_USERS_ALLOW_SIGN_UP=false
-              volumes:
-                - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
-                - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
-                - grafana-data:/var/lib/grafana
-              depends_on:
-                - prometheus
-              restart: always
-              networks:
-                - mlops-network
-                
-          networks:
-            mlops-network:
-              driver: bridge
-              
-          volumes:
-            prometheus-data:
-            grafana-data:
-          COMPOSE_EOF
-          
-          # Pull latest images
-          echo "📥 Pulling latest Docker images..."
-          sudo docker pull ${ML_INFERENCE_REPO}:latest || exit 1
-          sudo docker pull ${DATA_INGESTION_REPO}:latest || exit 1
-          
-          # Deploy services
+          # Deploy services using local docker-compose.yml from the repo
           echo "🚀 Deploying MLOps services..."
-          cd /home/ubuntu
-          sudo docker-compose down || true
-          sudo docker-compose up -d
+          sudo docker-compose down --remove-orphans 2>/dev/null || true
+          sudo docker-compose up --build -d
           
           # Wait for services to start
           echo "⏳ Waiting for services to initialize..."
