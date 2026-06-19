@@ -136,7 +136,7 @@ security_group = aws.ec2.SecurityGroup("mlops-sg",
 
 # Create ECR repositories with unique names and force delete
 ml_inference_repo = aws.ecr.Repository("ml-inference-repo",
-    name=f"mlops/ml-inference-{unique_suffix}",
+    name=f"ml-inference-{unique_suffix}",
     image_tag_mutability="MUTABLE",
     force_delete=True,  # This allows deletion even with images
     image_scanning_configuration=aws.ecr.RepositoryImageScanningConfigurationArgs(
@@ -149,7 +149,7 @@ ml_inference_repo = aws.ecr.Repository("ml-inference-repo",
 )
 
 data_ingestion_repo = aws.ecr.Repository("data-ingestion-repo",
-    name=f"mlops/data-ingestion-{unique_suffix}",
+    name=f"data-ingestion-{unique_suffix}",
     image_tag_mutability="MUTABLE",
     force_delete=True,  # This allows deletion even with images
     image_scanning_configuration=aws.ecr.RepositoryImageScanningConfigurationArgs(
